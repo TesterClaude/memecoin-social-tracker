@@ -1,0 +1,27 @@
+# Memecoin Tracker — M1 configuration
+# Every tunable lives here. Credentials live in .env, channels in channels.txt.
+
+database:
+  path: "data/tracker.db"
+
+sources:
+  telegram:
+    mode: "public_preview"          # M1: t.me/s/ scraping only
+    channels_file: "channels.txt"
+    poll_interval_s: 45
+    request_timeout_s: 15
+    user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+    # seconds to wait after an HTTP 429 before the channel is retried
+    backoff_on_429_s: 300
+
+extraction:
+  chain: "solana"
+  ticker_min_len: 2
+  ticker_max_len: 10
+
+alerts:
+  enabled: true
+  # hard cap per poll cycle so a mass-forward wave cannot flood the private channel
+  max_per_cycle: 15
+  # pause between sendMessage calls (Bot API allows ~1 msg/s to the same chat)
+  send_delay_s: 1.1
