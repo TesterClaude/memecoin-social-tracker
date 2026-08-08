@@ -28,3 +28,24 @@ class ExtractionResult:
     @property
     def has_hit(self) -> bool:
         return bool(self.addresses or self.tickers)
+
+
+@dataclass
+class EnrichedToken:
+    """Market state of one token at fetch time (best pair by liquidity)."""
+    address: str
+    chain_id: str
+    dex_id: str
+    pair_address: str
+    name: str | None = None
+    symbol: str | None = None
+    price_usd: float | None = None
+    mcap: float | None = None            # fdv, falling back to marketCap
+    liquidity_usd: float | None = None
+    vol_5m: float | None = None
+    vol_1h: float | None = None
+    txns_buy: int | None = None          # h1 window
+    txns_sell: int | None = None
+    price_change_h24: float | None = None
+    pool_created_at: str | None = None   # ISO-8601 UTC from pairCreatedAt
+    socials_json: str | None = None      # raw info.socials as JSON

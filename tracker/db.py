@@ -7,7 +7,13 @@ are created empty so M2 needs no migration. All timestamps UTC ISO-8601.
 import json
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+from tracker.models import EnrichedToken
+
+# mcap_at_pool_creation can only be estimated while the h24 price-change
+# window still covers the pool's entire life
+_POOL_ESTIMATE_MAX_AGE_H = 24
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -96,12 +102,36 @@ def _now_utc() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# M2 columns added to the §5 tokens table; applied idempotently on connect
+_TOKENS_M2_COLUMNS = {
+    "dex_id": "TEXT",
+    "pair_address": "TEXT",
+    "pool_created_at": "TEXT",
+    "mcap_at_first_mention": "REAL",
+    "mcap_at_pool_creation": "REAL",
+    "enriched_at": "TEXT",
+    # NULL = never enriched, 'ok' = enriched, 'ignored' = system mint,
+    # 'invalid_address' = fails base58 shape, 'invalid_no_pairs' = API knows
+    # no pair. invalid*/ignored are never queried (again).
+    "enrich_status": "TEXT",
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(tokens)")}
+    for column, col_type in _TOKENS_M2_COLUMNS.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE tokens ADD COLUMN {column} {col_type}")
+    conn.commit()
+
+
 def connect(path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     return conn
 
 
@@ -175,3 +205,117 @@ def upsert_token_first_seen(
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+def get_enrich_status(conn: sqlite3.Connection, contract_address: str) -> str | None:
+    row = conn.execute(
+        "SELECT enrich_status FROM tokens WHERE contract_address=?",
+        (contract_address,),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def set_enrich_status(conn: sqlite3.Connection, contract_address: str, status: str) -> None:
+    conn.execute(
+        "UPDATE tokens SET enrich_status=?, enriched_at=? WHERE contract_address=?",
+        (status, _now_utc(), contract_address),
+    )
+    conn.commit()
+
+
+def get_retryable_no_pairs(conn: sqlite3.Connection, window_hours: int) -> list[str]:
+    """no-pairs tokens whose FIRST MENTION is younger than the window.
+
+    A token called before its pool exists (insider chatter, §11 #21) gets
+    'invalid_no_pairs' on the first lookup — but the pool may appear minutes
+    later. These are re-checked every cycle until the window closes; after
+    that they drop out of this query and stay invalid for good."""
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(hours=window_hours)).isoformat(timespec="seconds")
+    return [r[0] for r in conn.execute(
+        "SELECT contract_address FROM tokens"
+        " WHERE enrich_status='invalid_no_pairs' AND first_mention_ts > ?",
+        (cutoff,))]
+
+
+def _age_hours(ts_iso: str | None, now: datetime) -> float | None:
+    if not ts_iso:
+        return None
+    try:
+        return (now - datetime.fromisoformat(ts_iso)).total_seconds() / 3600
+    except ValueError:
+        return None
+
+
+def apply_enrichment(
+    conn: sqlite3.Connection,
+    contract_address: str,
+    e: EnrichedToken,
+    first_mention_proxy_window_min: int,
+) -> None:
+    """Write market state into tokens. The two write-once fields:
+
+    - mcap_at_first_mention: current mcap, but ONLY if enrichment happens
+      within the proxy window of the first mention — for older tokens the
+      current mcap is not the mcap back then, so it stays NULL (honest).
+    - mcap_at_pool_creation: estimated from the h24 price change, only
+      while the pool is younger than 24h (see estimate_mcap_at_creation).
+    """
+    from tracker.enrich.dexscreener import estimate_mcap_at_creation
+
+    now = datetime.now(timezone.utc)
+    row = conn.execute(
+        """SELECT first_mention_ts, mcap_at_first_mention, mcap_at_pool_creation,
+                  first_seen_price, first_seen_mcap
+           FROM tokens WHERE contract_address=?""",
+        (contract_address,),
+    ).fetchone()
+    if row is None:
+        return
+    first_mention_ts, mcap_at_fm, mcap_at_pc, first_price, first_mcap = row
+
+    if mcap_at_fm is None and e.mcap is not None:
+        mention_age_h = _age_hours(first_mention_ts, now)
+        if mention_age_h is not None \
+                and mention_age_h * 60 <= first_mention_proxy_window_min:
+            mcap_at_fm = e.mcap
+
+    if mcap_at_pc is None:
+        mcap_at_pc = estimate_mcap_at_creation(
+            e.mcap, e.price_change_h24, _age_hours(e.pool_created_at, now))
+
+    conn.execute(
+        """UPDATE tokens SET
+             ticker            = COALESCE(ticker, ?),
+             name              = COALESCE(name, ?),
+             chain             = ?,
+             dex_id            = ?,
+             pair_address      = ?,
+             pool_created_at   = ?,
+             socials_json      = ?,
+             first_seen_price  = COALESCE(first_seen_price, ?),
+             first_seen_mcap   = COALESCE(first_seen_mcap, ?),
+             mcap_at_first_mention = ?,
+             mcap_at_pool_creation = ?,
+             enriched_at       = ?,
+             enrich_status     = 'ok'
+           WHERE contract_address = ?""",
+        (e.symbol, e.name, e.chain_id, e.dex_id, e.pair_address,
+         e.pool_created_at, e.socials_json, e.price_usd, e.mcap,
+         mcap_at_fm, mcap_at_pc,
+         now.isoformat(timespec="seconds"), contract_address),
+    )
+    conn.commit()
+
+
+def insert_snapshot(conn: sqlite3.Connection, contract_address: str,
+                    e: EnrichedToken) -> None:
+    conn.execute(
+        """INSERT OR REPLACE INTO token_snapshots
+           (contract_address, ts_utc, price_usd, mcap, liquidity_usd,
+            vol_5m, vol_1h, txns_buy, txns_sell)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (contract_address, _now_utc(), e.price_usd, e.mcap, e.liquidity_usd,
+         e.vol_5m, e.vol_1h, e.txns_buy, e.txns_sell),
+    )
+    conn.commit()

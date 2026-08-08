@@ -13,11 +13,34 @@ sources:
     user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
     # seconds to wait after an HTTP 429 before the channel is retried
     backoff_on_429_s: 300
+    # skip a channel (with a warning) if its newest post is older than this
+    stale_after_days: 14
 
 extraction:
   chain: "solana"
   ticker_min_len: 2
   ticker_max_len: 10
+
+# System mints that appear in swap links (sell side, routing) — never
+# queried, never alerted, never stored as a mention's contract_address.
+ignore_mints:
+  - "So11111111111111111111111111111111111111112"   # Wrapped SOL
+  - "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # USDC
+  - "Es9vMGVarhV8bvyJHu9jbEMYqMHRXfePLbWBM6WNbf8B"  # USDT
+
+enrichment:
+  enabled: true
+  api_base: "https://api.dexscreener.com"
+  request_timeout_s: 15
+  max_addresses_per_call: 30
+  min_request_interval_s: 0.2      # 300 req/min ceiling
+  max_retries_429: 4
+  # current mcap counts as mcap_at_first_mention only if enrichment happens
+  # within this many minutes of the first mention (live loop: always)
+  first_mention_proxy_window_min: 30
+  # no-pairs tokens are re-checked every cycle until this long after their
+  # first mention (pre-pool calls get a pool minutes later); then final
+  no_pairs_retry_window_h: 24
 
 alerts:
   enabled: true

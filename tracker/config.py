@@ -18,9 +18,19 @@ class Config:
     request_timeout_s: int
     user_agent: str
     backoff_on_429_s: int
+    stale_after_days: int
     chain: str
     ticker_min_len: int
     ticker_max_len: int
+    ignore_mints: list[str]
+    enrich_enabled: bool
+    enrich_api_base: str
+    enrich_timeout_s: int
+    enrich_max_addresses_per_call: int
+    enrich_min_request_interval_s: float
+    enrich_max_retries_429: int
+    first_mention_proxy_window_min: int
+    no_pairs_retry_window_h: int
     alerts_enabled: bool
     alerts_max_per_cycle: int
     alerts_send_delay_s: float
@@ -46,6 +56,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
     tg = raw["sources"]["telegram"]
     ex = raw["extraction"]
     al = raw["alerts"]
+    en = raw.get("enrichment", {})
 
     cfg = Config(
         db_path=raw["database"]["path"],
@@ -54,9 +65,19 @@ def load_config(config_path: str = "config.yaml") -> Config:
         request_timeout_s=int(tg["request_timeout_s"]),
         user_agent=tg["user_agent"],
         backoff_on_429_s=int(tg.get("backoff_on_429_s", 300)),
+        stale_after_days=int(tg.get("stale_after_days", 14)),
         chain=ex["chain"],
         ticker_min_len=int(ex["ticker_min_len"]),
         ticker_max_len=int(ex["ticker_max_len"]),
+        ignore_mints=list(raw.get("ignore_mints", [])),
+        enrich_enabled=bool(en.get("enabled", False)),
+        enrich_api_base=en.get("api_base", "https://api.dexscreener.com"),
+        enrich_timeout_s=int(en.get("request_timeout_s", 15)),
+        enrich_max_addresses_per_call=int(en.get("max_addresses_per_call", 30)),
+        enrich_min_request_interval_s=float(en.get("min_request_interval_s", 0.2)),
+        enrich_max_retries_429=int(en.get("max_retries_429", 4)),
+        first_mention_proxy_window_min=int(en.get("first_mention_proxy_window_min", 30)),
+        no_pairs_retry_window_h=int(en.get("no_pairs_retry_window_h", 24)),
         alerts_enabled=bool(al["enabled"]),
         alerts_max_per_cycle=int(al["max_per_cycle"]),
         alerts_send_delay_s=float(al.get("send_delay_s", 1.1)),

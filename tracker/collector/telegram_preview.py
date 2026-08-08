@@ -15,6 +15,7 @@ DOM notes (verified against live pages):
 import logging
 import re
 import time as _time
+from datetime import datetime, timezone
 
 import requests
 from bs4 import BeautifulSoup
@@ -24,6 +25,15 @@ from tracker.models import RawMessage
 log = logging.getLogger(__name__)
 
 _VIEWS_SUFFIX = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
+
+
+def newest_message_age_days(messages: list[RawMessage]) -> float | None:
+    """Age in days of the newest message timestamp, None if no timestamps."""
+    stamps = [m.ts_utc for m in messages if m.ts_utc]
+    if not stamps:
+        return None
+    newest = max(datetime.fromisoformat(t) for t in stamps)
+    return (datetime.now(timezone.utc) - newest).total_seconds() / 86400
 
 
 def parse_views(raw: str | None) -> int | None:
@@ -73,12 +83,15 @@ def parse_preview_html(html: str, channel: str) -> list[RawMessage]:
 
 
 class TelegramPreviewCollector:
-    def __init__(self, user_agent: str, timeout_s: int, backoff_on_429_s: int):
+    def __init__(self, user_agent: str, timeout_s: int, backoff_on_429_s: int,
+                 stale_after_days: int = 14):
         self._session = requests.Session()
         self._session.headers["User-Agent"] = user_agent
         self._timeout = timeout_s
         self._backoff_429 = backoff_on_429_s
+        self._stale_days = stale_after_days
         self._blocked_until: dict[str, float] = {}
+        self._stale_warned: set[str] = set()
 
     def fetch(self, channel: str) -> list[RawMessage]:
         """Fetch and parse one channel. Returns [] on any failure — the poll
@@ -102,4 +115,18 @@ class TelegramPreviewCollector:
         if "tgme_widget_message" not in resp.text:
             log.warning("no preview content for %s (private or no preview?)", channel)
             return []
-        return parse_preview_html(resp.text, channel)
+        messages = parse_preview_html(resp.text, channel)
+
+        # Dead-channel guard: if even the newest post is old, the channel is
+        # dormant — skip it (warn once, not every cycle; re-check each fetch
+        # so it comes back automatically when the channel posts again).
+        age = newest_message_age_days(messages)
+        if age is not None and age > self._stale_days:
+            if channel not in self._stale_warned:
+                log.warning(
+                    "channel %s is stale (newest post %.0f days old, threshold %dd)"
+                    " — skipping until it posts again", channel, age, self._stale_days)
+                self._stale_warned.add(channel)
+            return []
+        self._stale_warned.discard(channel)
+        return messages

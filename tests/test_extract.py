@@ -66,3 +66,10 @@ class TestDedupe:
 
     def test_normalize_strips_urls_and_case(self):
         assert normalize_text("BUY https://x.com/a NOW") == "buy now"
+
+    def test_url_only_posts_normalise_to_empty(self):
+        # URL-only posts share sha256("") — consumers must NOT treat that
+        # collision as a forward wave / duplicate (guarded in run.py and
+        # check_m1.py via EMPTY_TEXT_HASH)
+        assert normalize_text("https://jup.ag/swap?buy=abc") == ""
+        assert dedupe_hash("https://a.com/x") == dedupe_hash("https://b.com/y")

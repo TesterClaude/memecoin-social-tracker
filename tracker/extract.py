@@ -27,6 +27,25 @@ _MONEY_AMOUNT_RE = re.compile(r"^\d+(?:[.,]\d+)?[KMB]?$", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://\S+")
 _HAS_LETTER_RE = re.compile(r"[A-Za-z]")
 
+_B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def b58_decoded_len(s: str) -> int:
+    """Byte length of the base58-decoded string, -1 if not valid base58."""
+    n = 0
+    for ch in s:
+        idx = _B58_ALPHABET.find(ch)
+        if idx < 0:
+            return -1
+        n = n * 58 + idx
+    return (n.bit_length() + 7) // 8 + (len(s) - len(s.lstrip("1")))
+
+
+def is_valid_solana_address(addr: str) -> bool:
+    """True if the string decodes to exactly 32 bytes — a real pubkey shape.
+    Cheap local filter for regex false positives before any API call."""
+    return b58_decoded_len(addr) == 32
+
 
 def extract_addresses(text: str, links: list[str]) -> list[str]:
     """Solana addresses from visible text AND from every link href.

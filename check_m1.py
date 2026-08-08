@@ -5,8 +5,18 @@ Usage:  python check_m1.py [path/to/tracker.db]      (default: data/tracker.db)
 Opens the DB in read-only mode (URI mode=ro) — this script can never modify it.
 """
 
+import hashlib
 import sqlite3
 import sys
+from datetime import datetime, timezone
+from urllib.parse import quote
+
+# must match sources.telegram.stale_after_days in config.yaml
+STALE_AFTER_DAYS = 14
+
+# Hash of text that NORMALISES to empty (media-only and URL-only posts).
+# Such rows carry no textual "idea" and must never be grouped into waves.
+EMPTY_TEXT_HASH = hashlib.sha256(b"").hexdigest()
 
 # Console on Windows may fall back to cp1252 when piped; message text
 # contains emojis, so force UTF-8 with replacement.
@@ -49,17 +59,22 @@ def print_table(title: str, headers: list[str], rows: list[tuple]) -> None:
 
 def main() -> None:
     db_path = sys.argv[1] if len(sys.argv) > 1 else "data/tracker.db"
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    # percent-encode so '?'/'#' in the path cannot truncate the URI and
+    # silently drop mode=ro
+    path_uri = quote(db_path, safe=":/\\")
+    conn = sqlite3.connect(f"file:{path_uri}?mode=ro", uri=True)
     q = conn.execute
 
     # -- 1. message counts, total and per channel ------------------------------
     total = q("SELECT COUNT(*) FROM mentions").fetchone()[0]
+    # group by source_id, not handle: the same handle on two platforms is
+    # two sources and must not be merged once M3/M4 land
     per_channel = q("""
         SELECT s.handle, COUNT(*) AS n,
                SUM(CASE WHEN m.contract_address IS NOT NULL THEN 1 ELSE 0 END) AS with_ca,
                SUM(m.is_duplicate) AS dups
         FROM mentions m JOIN sources s ON s.source_id = m.source_id
-        GROUP BY s.handle ORDER BY n DESC
+        GROUP BY s.source_id ORDER BY n DESC
     """).fetchall()
     print(f"\nDatabase: {db_path}   |   total messages: {total}")
     print_table("1. Messages per channel", ["channel", "messages", "with CA", "duplicates"],
@@ -67,7 +82,8 @@ def main() -> None:
 
     # -- 2. timestamp range and UTC conformity ---------------------------------
     ts_min, ts_max, ts_null = q(
-        "SELECT MIN(ts_utc), MAX(ts_utc), SUM(CASE WHEN ts_utc IS NULL THEN 1 ELSE 0 END)"
+        "SELECT MIN(ts_utc), MAX(ts_utc),"
+        " COALESCE(SUM(CASE WHEN ts_utc IS NULL THEN 1 ELSE 0 END), 0)"
         " FROM mentions").fetchone()
     non_utc = q("""
         SELECT COUNT(*) FROM mentions
@@ -84,10 +100,10 @@ def main() -> None:
     # -- 3. hit composition ----------------------------------------------------
     comp = q("""
         SELECT
-          SUM(CASE WHEN contract_address IS NOT NULL AND ticker IS NOT NULL THEN 1 ELSE 0 END),
-          SUM(CASE WHEN contract_address IS NOT NULL AND ticker IS NULL     THEN 1 ELSE 0 END),
-          SUM(CASE WHEN contract_address IS NULL     AND ticker IS NOT NULL THEN 1 ELSE 0 END),
-          SUM(CASE WHEN contract_address IS NULL     AND ticker IS NULL     THEN 1 ELSE 0 END)
+          COALESCE(SUM(CASE WHEN contract_address IS NOT NULL AND ticker IS NOT NULL THEN 1 ELSE 0 END), 0),
+          COALESCE(SUM(CASE WHEN contract_address IS NOT NULL AND ticker IS NULL     THEN 1 ELSE 0 END), 0),
+          COALESCE(SUM(CASE WHEN contract_address IS NULL     AND ticker IS NOT NULL THEN 1 ELSE 0 END), 0),
+          COALESCE(SUM(CASE WHEN contract_address IS NULL     AND ticker IS NULL     THEN 1 ELSE 0 END), 0)
         FROM mentions
     """).fetchone()
     both, ca_only, ticker_only, none = comp
@@ -116,23 +132,28 @@ def main() -> None:
                     [(a, b58_decoded_len(a)) for a in invalid[:10]])
 
     # -- 5. forward waves (dedupe_hash seen more than once) --------------------
-    # Media-only posts have raw_text='' and share the hash of the empty string;
-    # they are excluded so they don't fake a giant wave.
-    wave_count = q("""
-        SELECT COUNT(*) FROM (
-          SELECT dedupe_hash FROM mentions WHERE raw_text != ''
-          GROUP BY dedupe_hash HAVING COUNT(*) > 1)
-    """).fetchone()[0]
+    # Excluded via EMPTY_TEXT_HASH: media-only posts (raw_text='') AND posts
+    # whose text normalises to '' (URL-only) — filtering on raw_text alone
+    # would merge unrelated URL-only posts into one fake wave.
+    wave_count, cross_channel = q("""
+        SELECT COUNT(*), COALESCE(SUM(is_cross), 0) FROM (
+          SELECT CASE WHEN COUNT(DISTINCT s.source_id) > 1 THEN 1 ELSE 0 END AS is_cross
+          FROM mentions m JOIN sources s ON s.source_id = m.source_id
+          WHERE m.dedupe_hash != ?
+          GROUP BY m.dedupe_hash HAVING COUNT(*) > 1)
+    """, (EMPTY_TEXT_HASH,)).fetchone()
     top_waves = q("""
         SELECT COUNT(*) AS occurrences,
-               COUNT(DISTINCT s.handle) AS channels,
+               COUNT(DISTINCT s.source_id) AS channels,
                MIN(m.raw_text) AS sample_text
         FROM mentions m JOIN sources s ON s.source_id = m.source_id
-        WHERE m.raw_text != ''
+        WHERE m.dedupe_hash != ?
         GROUP BY m.dedupe_hash HAVING COUNT(*) > 1
         ORDER BY occurrences DESC, channels DESC LIMIT 5
-    """).fetchall()
-    print(f"\n== 5. Forward waves ==\nhashes seen more than once: {wave_count}")
+    """, (EMPTY_TEXT_HASH,)).fetchall()
+    print(f"\n== 5. Forward waves ==\nhashes seen more than once: {wave_count}"
+          f"  (cross-channel: {cross_channel}, same-channel repeats:"
+          f" {wave_count - cross_channel})")
     print_table("Top 5 waves", ["occurrences", "channels", "text sample"],
                 [(o, c, snippet(t, 60)) for o, c, t in top_waves])
 
@@ -152,6 +173,27 @@ def main() -> None:
     # -- 7. no-hit messages (also shown in table 3) ----------------------------
     print(f"\n== 7. Messages without any hit: {none} of {total} "
           f"({none / total:.1%})" if total else "\n== 7. empty DB ==")
+
+    # -- 8. channel freshness --------------------------------------------------
+    # Channels whose newest stored post is old are dormant; the collector
+    # skips them live, this table shows the same view over the DB.
+    now = datetime.now(timezone.utc)
+    fresh_rows = []
+    for handle, newest in q("""
+        SELECT s.handle, MAX(m.ts_utc) FROM sources s
+        LEFT JOIN mentions m ON m.source_id = s.source_id
+        GROUP BY s.source_id ORDER BY MAX(m.ts_utc)
+    """):
+        if newest is None:
+            fresh_rows.append((handle, "-", "-", "NO DATA"))
+            continue
+        age_days = (now - datetime.fromisoformat(newest)).total_seconds() / 86400
+        status = "STALE" if age_days > STALE_AFTER_DAYS else "OK"
+        fresh_rows.append((handle, newest, f"{age_days:.1f}", status))
+    n_stale = sum(1 for r in fresh_rows if r[3] == "STALE")
+    print_table(f"8. Channel freshness (stale = newest post > {STALE_AFTER_DAYS} days old"
+                f" — {n_stale} stale)",
+                ["channel", "newest post", "age (days)", "status"], fresh_rows)
 
     conn.close()
 
