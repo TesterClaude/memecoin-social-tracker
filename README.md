@@ -1,4 +1,4 @@
-# Memecoin Tracker — M1
+# Memecoin Tracker — M1 + M2
 
 Telegram collector (public preview via `t.me/s/`, no auth, no ban risk) →
 SQLite (§5 schema) → raw-match alerts into a private Telegram channel.
@@ -11,8 +11,9 @@ No scoring, no enrichment, no safety checks yet — that's M2+.
 2. `pip install -r requirements.txt`
 3. Create a bot via **@BotFather**, add it as admin to your private alert
    channel, copy `.env.example` → `.env` and fill in token + chat id.
-4. Adjust `channels.txt` (one public channel handle per line) and
-   `config.yaml` if needed.
+4. Copy `channels.example.txt` to `channels.txt` (gitignored) and put in
+   your channels, one public channel handle per line. Adjust `config.yaml`
+   if needed.
 5. `python run.py`
 
 ## Tests
