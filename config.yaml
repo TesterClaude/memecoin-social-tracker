@@ -42,6 +42,13 @@ enrichment:
   # first mention (pre-pool calls get a pool minutes later); then final
   no_pairs_retry_window_h: 24
 
+forward_testing:
+  enabled: true
+  # measurement points in minutes after the first mention
+  checkpoints_min: [15, 60, 240, 1440]
+  # liquidity below this (after having been above) counts as rug
+  rug_liquidity_floor_usd: 1000
+
 alerts:
   enabled: true
   # hard cap per poll cycle so a mass-forward wave cannot flood the private channel

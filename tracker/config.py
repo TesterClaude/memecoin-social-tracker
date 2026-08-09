@@ -31,6 +31,9 @@ class Config:
     enrich_max_retries_429: int
     first_mention_proxy_window_min: int
     no_pairs_retry_window_h: int
+    forward_enabled: bool
+    forward_checkpoints_min: list[int]
+    rug_liquidity_floor_usd: float
     alerts_enabled: bool
     alerts_max_per_cycle: int
     alerts_send_delay_s: float
@@ -57,6 +60,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
     ex = raw["extraction"]
     al = raw["alerts"]
     en = raw.get("enrichment", {})
+    ft = raw.get("forward_testing", {})
 
     cfg = Config(
         db_path=raw["database"]["path"],
@@ -78,6 +82,10 @@ def load_config(config_path: str = "config.yaml") -> Config:
         enrich_max_retries_429=int(en.get("max_retries_429", 4)),
         first_mention_proxy_window_min=int(en.get("first_mention_proxy_window_min", 30)),
         no_pairs_retry_window_h=int(en.get("no_pairs_retry_window_h", 24)),
+        forward_enabled=bool(ft.get("enabled", False)),
+        forward_checkpoints_min=[int(m) for m in
+                                 ft.get("checkpoints_min", [15, 60, 240, 1440])],
+        rug_liquidity_floor_usd=float(ft.get("rug_liquidity_floor_usd", 1000)),
         alerts_enabled=bool(al["enabled"]),
         alerts_max_per_cycle=int(al["max_per_cycle"]),
         alerts_send_delay_s=float(al.get("send_delay_s", 1.1)),

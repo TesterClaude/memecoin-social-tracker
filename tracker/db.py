@@ -95,6 +95,21 @@ CREATE TABLE IF NOT EXISTS calls (
     outcome_mfe       REAL,
     outcome_mae       REAL
 );
+
+CREATE TABLE IF NOT EXISTS call_checkpoints (
+    call_id           INTEGER NOT NULL REFERENCES calls(call_id),
+    checkpoint_min    INTEGER NOT NULL,
+    due_ts            TEXT NOT NULL,
+    measured_ts       TEXT,
+    price_usd         REAL,
+    mcap              REAL,
+    liquidity_usd     REAL,
+    pair_missing      INTEGER NOT NULL DEFAULT 0,
+    liq_gone          INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (call_id, checkpoint_min)
+);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_open
+    ON call_checkpoints(due_ts) WHERE measured_ts IS NULL;
 """
 
 
@@ -117,11 +132,26 @@ _TOKENS_M2_COLUMNS = {
 }
 
 
+# M6 columns added to the §5 calls table
+_CALLS_M6_COLUMNS = {
+    "price_at_call": "REAL",
+    "liquidity_at_call": "REAL",
+    # when the baseline was captured — equals enrichment time for normal
+    # calls, later for pre-pool calls whose first price arrives with a
+    # checkpoint. NULL = no price ever seen.
+    "baseline_ts": "TEXT",
+    # 'open' -> 'done' | 'no_pool' once the last checkpoint is measured
+    "status": "TEXT NOT NULL DEFAULT 'open'",
+}
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(tokens)")}
-    for column, col_type in _TOKENS_M2_COLUMNS.items():
-        if column not in existing:
-            conn.execute(f"ALTER TABLE tokens ADD COLUMN {column} {col_type}")
+    for table, columns in (("tokens", _TOKENS_M2_COLUMNS),
+                           ("calls", _CALLS_M6_COLUMNS)):
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for column, col_type in columns.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
     conn.commit()
 
 

@@ -1,4 +1,4 @@
-# Memecoin Tracker — M1 + M2
+# Memecoin Tracker — M1 + M2 + M6
 
 Telegram collector (public preview via `t.me/s/`, no auth, no ban risk) →
 SQLite (§5 schema) → raw-match alerts into a private Telegram channel.
@@ -45,6 +45,20 @@ Honesty notes on the M2 fields: `mcap_at_first_mention` is only set when
 enrichment happens within `first_mention_proxy_window_min` of the first
 mention (always true live, mostly NULL in backfill). `mcap_at_pool_creation`
 is an estimate from the h24 price change, only for pools younger than 24h.
+
+## M6: Forward-testing log
+
+Every FIRST mention of a token opens a call entry at mention time (no
+look-ahead, no retroactive entries) with checkpoints at +15m/+1h/+4h/+24h.
+Each checkpoint records price/mcap/liquidity plus a rug flag (`liq_gone`:
+liquidity fell below `rug_liquidity_floor_usd` or the pair vanished after
+having had liquidity — distinct from a plain price drop). MFE/MAE are
+derived per call; tokens that never get a pool end as `no_pool` and stay
+in every statistic (no survivorship bias). Report per channel:
+
+```
+python report_forward.py
+```
 
 ## Notes
 

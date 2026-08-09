@@ -6,7 +6,7 @@ Ctrl+C stops cleanly. One unreachable channel never kills the loop.
 import logging
 import time
 
-from tracker import db, extract
+from tracker import db, extract, forward
 from tracker.alert import AlertBot, format_alert
 from tracker.collector.telegram_preview import TelegramPreviewCollector
 from tracker.config import load_config
@@ -22,10 +22,12 @@ log = logging.getLogger("run")
 
 def process_message(conn, cfg, msg: RawMessage,
                     ignore_mints: frozenset[str] = frozenset(),
-                    ) -> tuple[ExtractionResult, bool] | None:
-    """Store a new message. Returns (result, alertable) for fresh messages,
-    None if the message was already ingested. alertable is False for
-    duplicates (forward waves) and no-hit messages."""
+                    ) -> tuple[ExtractionResult, bool, list[str]] | None:
+    """Store a new message. Returns (result, alertable, first_seen_addresses)
+    for fresh messages, None if the message was already ingested. alertable
+    is False for duplicates (forward waves) and no-hit messages;
+    first_seen_addresses are addresses never stored in tokens before —
+    these open forward-test entries (M6)."""
     if db.mention_exists(conn, msg.platform, msg.external_id):
         return None
 
@@ -60,13 +62,14 @@ def process_message(conn, cfg, msg: RawMessage,
         is_duplicate=is_dup,
         dedupe_hash=result.dedupe_hash,
     )
+    first_seen = []
     for addr in result.addresses:
-        db.upsert_token_first_seen(
-            conn, addr, cfg.chain,
-            result.tickers[0] if result.tickers else None, msg.ts_utc,
-        )
+        if db.upsert_token_first_seen(
+                conn, addr, cfg.chain,
+                result.tickers[0] if result.tickers else None, msg.ts_utc):
+            first_seen.append(addr)
 
-    return result, (result.has_hit and not is_dup)
+    return result, (result.has_hit and not is_dup), first_seen
 
 
 def enrich_addresses(conn, cfg, client: DexScreenerClient,
@@ -133,11 +136,15 @@ def main() -> None:
              "enrichment %s", len(cfg.channels), cfg.poll_interval_s,
              "on" if bot else "off", "on" if enricher else "off")
 
+    if cfg.forward_enabled and enricher is None:
+        log.warning("forward_testing.enabled without enrichment: entries are "
+                    "created but checkpoints cannot be measured")
+
     while True:
         cycle_start = time.monotonic()
 
         # phase 1: collect and store everything new this cycle
-        new_items: list[tuple[RawMessage, ExtractionResult, bool]] = []
+        new_items: list[tuple[RawMessage, ExtractionResult, bool, list[str]]] = []
         for channel in cfg.channels:
             for msg in collector.fetch(channel):
                 processed = process_message(conn, cfg, msg, ignore)
@@ -145,13 +152,34 @@ def main() -> None:
                     new_items.append((msg, *processed))
 
         # phase 2: one batched DexScreener pass over every address seen
-        addresses = {a for _, result, _ in new_items for a in result.addresses}
+        addresses = {a for _, result, _, _ in new_items for a in result.addresses}
         market = enrich_addresses(conn, cfg, enricher, addresses) \
             if enricher and addresses else {}
 
-        # phase 3: alerts, now carrying market data
+        # phase 3: open forward-test entries for first-ever-seen tokens,
+        # baseline from this cycle's enrichment (M6, §10)
+        calls_opened = 0
+        if cfg.forward_enabled:
+            for msg, _, _, first_seen in new_items:
+                for addr in first_seen:
+                    source_id = db.get_or_create_source(conn, msg.platform, msg.channel)
+                    if forward.create_call(conn, source_id, addr, msg.ts_utc,
+                                           market.get(addr),
+                                           cfg.forward_checkpoints_min) is not None:
+                        calls_opened += 1
+
+        # phase 4: measure due forward-test checkpoints (same client,
+        # same rate limit as enrichment)
+        measured = 0
+        if cfg.forward_enabled and enricher is not None:
+            due = forward.due_checkpoint_addresses(conn)
+            if due:
+                measured = forward.record_measurements(
+                    conn, enricher.fetch_tokens(due), cfg.rug_liquidity_floor_usd)
+
+        # phase 5: alerts, carrying market data
         alerts_sent = suppressed = 0
-        for msg, result, alertable in new_items:
+        for msg, result, alertable, _ in new_items:
             if not alertable or bot is None:
                 continue
             if alerts_sent >= cfg.alerts_max_per_cycle:
@@ -162,8 +190,10 @@ def main() -> None:
                 alerts_sent += 1
 
         elapsed = time.monotonic() - cycle_start
-        log.info("cycle done in %.1fs: %d new messages, %d enriched, %d alerts%s",
-                 elapsed, len(new_items), len(market), alerts_sent,
+        log.info("cycle done in %.1fs: %d new messages, %d enriched, "
+                 "%d calls opened, %d checkpoints measured, %d alerts%s",
+                 elapsed, len(new_items), len(market), calls_opened, measured,
+                 alerts_sent,
                  f", {suppressed} suppressed by cap" if suppressed else "")
         time.sleep(max(0.0, cfg.poll_interval_s - elapsed))
 
