@@ -36,7 +36,8 @@ def _iso(dt: datetime) -> str:
 def create_call(conn, source_id: int, contract_address: str,
                 mention_ts: str | None, market: EnrichedToken | None,
                 checkpoints_min=DEFAULT_CHECKPOINTS_MIN,
-                now: datetime | None = None) -> int | None:
+                now: datetime | None = None,
+                late_discovery: bool = False) -> int | None:
     """Open a forward-test entry for a token's first mention.
 
     Returns the call_id, or None if a call already exists OR the mention
@@ -57,13 +58,15 @@ def create_call(conn, source_id: int, contract_address: str,
     has_baseline = market is not None and market.price_usd is not None
     cur = conn.execute(
         """INSERT INTO calls (source_id, contract_address, ts_utc, mcap_at_call,
-                              price_at_call, liquidity_at_call, baseline_ts, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'open')""",
+                              price_at_call, liquidity_at_call, baseline_ts,
+                              status, late_discovery)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)""",
         (source_id, contract_address, _iso(mention_dt),
          market.mcap if has_baseline else None,
          market.price_usd if has_baseline else None,
          market.liquidity_usd if has_baseline else None,
-         _iso(now_dt) if has_baseline else None),
+         _iso(now_dt) if has_baseline else None,
+         int(late_discovery)),
     )
     call_id = cur.lastrowid
     for minutes in checkpoints_min:
@@ -189,22 +192,27 @@ def _update_outcome(conn, call_id: int) -> None:
 
 def channel_stats(conn) -> list[dict]:
     """Per-channel forward-test statistics over COMPLETED calls, plus an
-    '(all)' row. no_pool calls stay in every denominator."""
+    '(all)' row. no_pool calls stay in every denominator. late_discovery
+    calls (first mention was an OUTCOME post) are EXCLUDED from the main
+    numbers and reported separately — they would poison channel stats."""
     rows = conn.execute(
         """SELECT s.handle, c.status, c.outcome_mfe, c.outcome_mae,
                   EXISTS(SELECT 1 FROM call_checkpoints k
-                         WHERE k.call_id = c.call_id AND k.liq_gone = 1)
+                         WHERE k.call_id = c.call_id AND k.liq_gone = 1),
+                  c.late_discovery
            FROM calls c JOIN sources s ON s.source_id = c.source_id""").fetchall()
 
     def aggregate(name: str, subset: list) -> dict:
-        completed = [r for r in subset if r[1] in ("done", "no_pool")]
+        regular = [r for r in subset if not r[5]]
+        completed = [r for r in regular if r[1] in ("done", "no_pool")]
         mfes = [r[2] for r in completed if r[2] is not None]
         maes = [r[3] for r in completed if r[3] is not None]
         n = len(completed)
         return {
             "channel": name,
             "calls_completed": n,
-            "calls_open": sum(1 for r in subset if r[1] == "open"),
+            "calls_open": sum(1 for r in regular if r[1] == "open"),
+            "late_discovery": sum(1 for r in subset if r[5]),
             "median_mfe": statistics.median(mfes) if mfes else None,
             "median_mae": statistics.median(maes) if maes else None,
             "rug_share": sum(1 for r in completed if r[4]) / n if n else None,
@@ -221,3 +229,27 @@ def channel_stats(conn) -> list[dict]:
              sorted(by_channel.items(), key=lambda kv: -len(kv[1]))]
     stats.append(aggregate("(all)", rows))
     return stats
+
+
+def unposted_final_calls(conn) -> list[dict]:
+    """Finalised calls whose +24h outcome has not been posted yet, with
+    the origin alert message id (None if there was no NEW_CALL alert)."""
+    rows = conn.execute(
+        """SELECT c.call_id, c.contract_address, c.status, c.outcome_mfe,
+                  c.outcome_mae, t.alert_message_id,
+                  EXISTS(SELECT 1 FROM call_checkpoints k
+                         WHERE k.call_id = c.call_id AND k.liq_gone = 1),
+                  (SELECT k.mcap FROM call_checkpoints k
+                   WHERE k.call_id = c.call_id AND k.measured_ts IS NOT NULL
+                   ORDER BY k.checkpoint_min DESC LIMIT 1)
+           FROM calls c
+           LEFT JOIN tokens t ON t.contract_address = c.contract_address
+           WHERE c.status != 'open' AND c.outcome_posted = 0""").fetchall()
+    return [{"call_id": r[0], "contract_address": r[1], "status": r[2],
+             "mfe": r[3], "mae": r[4], "alert_message_id": r[5],
+             "rugged": bool(r[6]), "mcap_final": r[7]} for r in rows]
+
+
+def mark_outcome_posted(conn, call_id: int) -> None:
+    conn.execute("UPDATE calls SET outcome_posted=1 WHERE call_id=?", (call_id,))
+    conn.commit()

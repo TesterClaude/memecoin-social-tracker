@@ -37,6 +37,8 @@ class Config:
     alerts_enabled: bool
     alerts_max_per_cycle: int
     alerts_send_delay_s: float
+    alert_types: dict
+    post_24h_outcome_reply: bool
     bot_token: str = field(repr=False, default="")
     alert_chat_id: str = ""
 
@@ -89,6 +91,10 @@ def load_config(config_path: str = "config.yaml") -> Config:
         alerts_enabled=bool(al["enabled"]),
         alerts_max_per_cycle=int(al["max_per_cycle"]),
         alerts_send_delay_s=float(al.get("send_delay_s", 1.1)),
+        alert_types={str(k): bool(v) for k, v in
+                     al.get("by_type", {"NEW_CALL": True, "OUTCOME": True,
+                                        "LIST": False, "COMMENTARY": False}).items()},
+        post_24h_outcome_reply=bool(al.get("post_24h_outcome_reply", True)),
         bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         alert_chat_id=os.getenv("TELEGRAM_ALERT_CHAT_ID", ""),
     )

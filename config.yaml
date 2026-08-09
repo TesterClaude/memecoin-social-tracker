@@ -55,3 +55,11 @@ alerts:
   max_per_cycle: 15
   # pause between sendMessage calls (Bot API allows ~1 msg/s to the same chat)
   send_delay_s: 1.1
+  # which message types trigger an alert
+  by_type:
+    NEW_CALL: true
+    OUTCOME: true
+    LIST: false
+    COMMENTARY: false
+  # post the +24h forward-log measurement as a reply under the origin call
+  post_24h_outcome_reply: true

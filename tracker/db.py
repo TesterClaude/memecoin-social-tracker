@@ -142,12 +142,32 @@ _CALLS_M6_COLUMNS = {
     "baseline_ts": "TEXT",
     # 'open' -> 'done' | 'no_pool' once the last checkpoint is measured
     "status": "TEXT NOT NULL DEFAULT 'open'",
+    # 1 = the token's FIRST mention was an OUTCOME post: the call was
+    # discovered late and must be excluded from main channel statistics
+    "late_discovery": "INTEGER NOT NULL DEFAULT 0",
+    # 1 = the +24h outcome reply was posted (or nothing to post)
+    "outcome_posted": "INTEGER NOT NULL DEFAULT 0",
+}
+
+_MENTIONS_ALERT_COLUMNS = {
+    # NEW_CALL | OUTCOME | LIST | COMMENTARY; NULL for pre-feature rows
+    "message_type": "TEXT",
+    # all hrefs of the message block as a JSON array — CAs often live only
+    # here; without them, stored messages could never be re-classified
+    "links_json": "TEXT",
+}
+
+_TOKENS_ALERT_COLUMNS = {
+    # Telegram message_id of the NEW_CALL alert, for reply threading
+    "alert_message_id": "INTEGER",
 }
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
     for table, columns in (("tokens", _TOKENS_M2_COLUMNS),
-                           ("calls", _CALLS_M6_COLUMNS)):
+                           ("tokens", _TOKENS_ALERT_COLUMNS),
+                           ("calls", _CALLS_M6_COLUMNS),
+                           ("mentions", _MENTIONS_ALERT_COLUMNS)):
         existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         for column, col_type in columns.items():
             if column not in existing:
@@ -207,17 +227,75 @@ def insert_mention(
     views: int | None,
     is_duplicate: bool,
     dedupe_hash: str,
+    message_type: str | None = None,
+    links: list[str] | None = None,
 ) -> None:
     engagement = json.dumps({"views": views}) if views is not None else None
+    links_json = json.dumps(links) if links else None
     conn.execute(
         """INSERT OR IGNORE INTO mentions
            (platform, source_id, external_id, ts_utc, raw_text, ticker,
-            contract_address, chain, engagement_json, is_duplicate, dedupe_hash)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            contract_address, chain, engagement_json, is_duplicate, dedupe_hash,
+            message_type, links_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (platform, source_id, external_id, ts_utc, raw_text, ticker,
-         contract_address, chain, engagement, int(is_duplicate), dedupe_hash),
+         contract_address, chain, engagement, int(is_duplicate), dedupe_hash,
+         message_type, links_json),
     )
     conn.commit()
+
+
+def set_alert_message_id(conn: sqlite3.Connection, contract_address: str,
+                         message_id: int) -> None:
+    conn.execute("UPDATE tokens SET alert_message_id=? WHERE contract_address=?",
+                 (message_id, contract_address))
+    conn.commit()
+
+
+def get_alert_message_id(conn: sqlite3.Connection,
+                         contract_address: str) -> int | None:
+    row = conn.execute("SELECT alert_message_id FROM tokens WHERE contract_address=?",
+                       (contract_address,)).fetchone()
+    return row[0] if row else None
+
+
+def get_token_ticker(conn: sqlite3.Connection,
+                     contract_address: str) -> str | None:
+    row = conn.execute("SELECT ticker FROM tokens WHERE contract_address=?",
+                       (contract_address,)).fetchone()
+    return row[0] if row else None
+
+
+def ticker_collision_count(conn: sqlite3.Connection, ticker: str,
+                           since_iso: str) -> int:
+    """Distinct contract addresses mentioned with this ticker since the
+    given timestamp — >1 means ticker collision (§7: key on CA, never ticker)."""
+    return conn.execute(
+        """SELECT COUNT(DISTINCT contract_address) FROM mentions
+           WHERE ticker = ? COLLATE NOCASE AND contract_address IS NOT NULL
+             AND ts_utc >= ?""",
+        (ticker, since_iso)).fetchone()[0]
+
+
+def mention_chain_position(conn: sqlite3.Connection, contract_address: str,
+                           before_ts: str) -> tuple[int, str | None, float | None]:
+    """(position, first_channel, minutes_after_first) of a mention at
+    before_ts within the mention chain of this CA. Position 1 = first."""
+    first = conn.execute(
+        """SELECT s.handle, m.ts_utc FROM mentions m
+           JOIN sources s ON s.source_id = m.source_id
+           WHERE m.contract_address = ? AND m.ts_utc < ?
+           ORDER BY m.ts_utc LIMIT 1""",
+        (contract_address, before_ts)).fetchone()
+    if first is None:
+        return 1, None, None
+    n_prior = conn.execute(
+        """SELECT COUNT(DISTINCT source_id) FROM mentions
+           WHERE contract_address = ? AND ts_utc < ?""",
+        (contract_address, before_ts)).fetchone()[0]
+    minutes = (datetime.fromisoformat(before_ts)
+               - datetime.fromisoformat(first[1])).total_seconds() / 60
+    return n_prior + 1, first[0], minutes
 
 
 def upsert_token_first_seen(

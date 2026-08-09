@@ -26,9 +26,10 @@ def main() -> None:
     conn = sqlite3.connect(f"file:{path_uri}?mode=ro", uri=True)
 
     stats = channel_stats(conn)
-    headers = ["channel", "done", "open", "med MFE", "med MAE",
+    headers = ["channel", "done", "open", "late", "med MFE", "med MAE",
                "rug", "no pool", ">+50%"]
     rows = [[s["channel"], s["calls_completed"], s["calls_open"],
+             s["late_discovery"],
              _fmt_pct(s["median_mfe"]), _fmt_pct(s["median_mae"]),
              _fmt_share(s["rug_share"]), _fmt_share(s["no_pool_share"]),
              _fmt_share(s["over_50_share"])] for s in stats]
@@ -54,7 +55,9 @@ Notes (§10, non-negotiable context):
 - 'rug' = liquidity fell below the configured floor (or the pair
   vanished) after having been above it — distinct from a price drop
   with intact liquidity. Median MFE/MAE cover calls with a price
-  baseline; 'rug'/'no pool'/'>+50%' shares cover ALL completed calls.""")
+  baseline; 'rug'/'no pool'/'>+50%' shares cover ALL completed calls.
+- 'late' = calls whose FIRST sighting was an OUTCOME retrospect
+  (late discovery). They are excluded from every other column.""")
     conn.close()
 
 

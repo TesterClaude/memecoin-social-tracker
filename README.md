@@ -46,6 +46,26 @@ enrichment happens within `first_mention_proxy_window_min` of the first
 mention (always true live, mostly NULL in backfill). `mcap_at_pool_creation`
 is an estimate from the h24 price change, only for pools younger than 24h.
 
+## Message classification & alert threading
+
+Every ingested message is classified (`mentions.message_type`) as
+NEW_CALL (exactly one CA), OUTCOME (retrospect: "up 2.0X", "up 86%",
+"$28K → $56K", "from Entry Signal"), LIST (multiple tickers/CAs, no
+single CA) or COMMENTARY (rest). Nothing is discarded — classification
+only labels. Per-type alert switches live in `alerts.by_type`
+(default: NEW_CALL + OUTCOME on).
+
+NEW_CALL alerts store their Telegram message id
+(`tokens.alert_message_id`); OUTCOME alerts for the same CA are sent as
+replies under the origin call, and (switchable via
+`alerts.post_24h_outcome_reply`) the +24h forward-log measurement is
+posted there too. Alerts show facts only: market data, volume/tx (holder
+count, bundled %, sniper count need an on-chain source — M5), ticker
+collisions in 24h, position in the mention chain, pre-pool lead time.
+
+If a token's FIRST sighting is an OUTCOME post, its forward-test call is
+flagged `late_discovery=1` and excluded from main channel statistics.
+
 ## M6: Forward-testing log
 
 Every FIRST mention of a token opens a call entry at mention time (no

@@ -31,6 +31,26 @@ class ExtractionResult:
 
 
 @dataclass
+class ProcessedMessage:
+    """Result of ingesting one fresh message."""
+    result: ExtractionResult
+    message_type: str            # NEW_CALL | OUTCOME | LIST | COMMENTARY
+    is_duplicate: bool           # forward-wave duplicate (never alerted)
+    first_seen: list[str]        # addresses never stored in tokens before
+
+
+@dataclass
+class AlertFacts:
+    """Context facts shown in an alert — facts only, no scoring."""
+    ticker_collisions_24h: int = 0       # distinct CAs for this ticker, last 24h
+    chain_position: int = 1              # 1 = first channel to mention this CA
+    first_channel: str | None = None     # who was first (when position > 1)
+    minutes_after_first: float | None = None
+    prepool_lead_min: float | None = None  # mention preceded pool creation by X min
+    pool_missing: bool = False           # CA known but no pool exists yet
+
+
+@dataclass
 class EnrichedToken:
     """Market state of one token at fetch time (best pair by liquidity)."""
     address: str

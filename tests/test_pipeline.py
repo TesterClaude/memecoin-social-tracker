@@ -55,12 +55,13 @@ def _enriched(addr: str) -> EnrichedToken:
 class TestDedupe:
     def test_identical_forward_is_duplicate(self):
         conn = _conn()
-        r1, alert1, first1 = process_message(conn, CFG, _msg("chan_a", 1, f"APE NOW {CA1}"))
-        assert alert1 and r1.addresses == [CA1] and first1 == [CA1]
-        # same text forwarded to another channel: stored, but not alertable,
+        p1 = process_message(conn, CFG, _msg("chan_a", 1, f"APE NOW {CA1}"))
+        assert not p1.is_duplicate and p1.result.addresses == [CA1] \
+            and p1.first_seen == [CA1]
+        # same text forwarded to another channel: stored, marked duplicate,
         # and the token is no longer first-seen
-        r2, alert2, first2 = process_message(conn, CFG, _msg("chan_b", 9, f"APE NOW {CA1}"))
-        assert alert2 is False and first2 == []
+        p2 = process_message(conn, CFG, _msg("chan_b", 9, f"APE NOW {CA1}"))
+        assert p2.is_duplicate and p2.first_seen == []
         dup = conn.execute(
             "SELECT is_duplicate FROM mentions WHERE external_id='chan_b/9'").fetchone()
         assert dup == (1,)
@@ -71,12 +72,30 @@ class TestDedupe:
         conn = _conn()
         m1 = _msg("chan_a", 1, "https://jup.ag/swap?buy=x", [f"https://jup.ag/swap?buy={CA1}"])
         m2 = _msg("chan_b", 2, "https://jup.ag/swap?buy=y", [f"https://jup.ag/swap?buy={CA2}"])
-        r1, alert1, _ = process_message(conn, CFG, m1)
-        r2, alert2, _ = process_message(conn, CFG, m2)
-        assert alert1 and r1.addresses == [CA1]
-        assert alert2 and r2.addresses == [CA2]
+        p1 = process_message(conn, CFG, m1)
+        p2 = process_message(conn, CFG, m2)
+        assert not p1.is_duplicate and p1.result.addresses == [CA1]
+        assert not p2.is_duplicate and p2.result.addresses == [CA2]
         dups = conn.execute("SELECT SUM(is_duplicate) FROM mentions").fetchone()[0]
         assert dups == 0
+
+    def test_links_stored_as_json(self):
+        conn = _conn()
+        link = f"https://dexscreener.com/solana/{CA1}"
+        process_message(conn, CFG, _msg("chan_a", 1, "CHART 📈", [link]))
+        process_message(conn, CFG, _msg("chan_a", 2, "no links here"))
+        rows = dict(conn.execute(
+            "SELECT external_id, links_json FROM mentions").fetchall())
+        assert rows["chan_a/1"] == f'["{link}"]'
+        assert rows["chan_a/2"] is None
+
+    def test_message_type_stored(self):
+        conn = _conn()
+        process_message(conn, CFG, _msg("chan_a", 1, f"New Trending! MC $16K {CA1}"))
+        process_message(conn, CFG, _msg("chan_a", 2, "market is bleeding"))
+        types = dict(conn.execute(
+            "SELECT external_id, message_type FROM mentions").fetchall())
+        assert types == {"chan_a/1": "NEW_CALL", "chan_a/2": "COMMENTARY"}
 
     def test_same_message_not_reingested(self):
         conn = _conn()
@@ -91,9 +110,9 @@ class TestIgnoreMints:
     def test_system_mint_not_stored_not_alertable(self):
         conn = _conn()
         m = _msg("chan_a", 1, "swap link", [f"https://jup.ag/swap?sell={WSOL}"])
-        result, alertable, first_seen = process_message(conn, CFG, m, frozenset([WSOL]))
-        assert result.addresses == []
-        assert alertable is False and first_seen == []
+        p = process_message(conn, CFG, m, frozenset([WSOL]))
+        assert p.result.addresses == [] and p.first_seen == []
+        assert p.message_type == "COMMENTARY"  # no CA left after filtering
         assert conn.execute("SELECT COUNT(*) FROM tokens").fetchone()[0] == 0
         ca = conn.execute("SELECT contract_address FROM mentions").fetchone()
         assert ca == (None,)
@@ -102,9 +121,9 @@ class TestIgnoreMints:
         conn = _conn()
         m = _msg("chan_a", 1, "swap",
                  [f"https://jup.ag/swap?sell={WSOL}&buy={CA1}"])
-        result, alertable, first_seen = process_message(conn, CFG, m, frozenset([WSOL]))
-        assert result.addresses == [CA1]
-        assert alertable is True and first_seen == [CA1]
+        p = process_message(conn, CFG, m, frozenset([WSOL]))
+        assert p.result.addresses == [CA1] and p.first_seen == [CA1]
+        assert p.message_type == "NEW_CALL"
 
 
 class TestNoPairsRetry:
