@@ -34,6 +34,10 @@ class Config:
     forward_enabled: bool
     forward_checkpoints_min: list[int]
     rug_liquidity_floor_usd: float
+    baseline_enabled: bool
+    baseline_poll_interval_s: int
+    baseline_max_new_per_cycle: int
+    baseline_max_pool_age_min: int
     alerts_enabled: bool
     alerts_max_per_cycle: int
     alerts_send_delay_s: float
@@ -63,6 +67,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
     al = raw["alerts"]
     en = raw.get("enrichment", {})
     ft = raw.get("forward_testing", {})
+    bl = raw.get("baseline", {})
 
     cfg = Config(
         db_path=raw["database"]["path"],
@@ -88,6 +93,10 @@ def load_config(config_path: str = "config.yaml") -> Config:
         forward_checkpoints_min=[int(m) for m in
                                  ft.get("checkpoints_min", [15, 60, 240, 1440])],
         rug_liquidity_floor_usd=float(ft.get("rug_liquidity_floor_usd", 1000)),
+        baseline_enabled=bool(bl.get("enabled", False)),
+        baseline_poll_interval_s=int(bl.get("poll_interval_s", 300)),
+        baseline_max_new_per_cycle=int(bl.get("max_new_per_cycle", 10)),
+        baseline_max_pool_age_min=int(bl.get("max_pool_age_min", 60)),
         alerts_enabled=bool(al["enabled"]),
         alerts_max_per_cycle=int(al["max_per_cycle"]),
         alerts_send_delay_s=float(al.get("send_delay_s", 1.1)),

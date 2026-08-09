@@ -37,7 +37,8 @@ def create_call(conn, source_id: int, contract_address: str,
                 mention_ts: str | None, market: EnrichedToken | None,
                 checkpoints_min=DEFAULT_CHECKPOINTS_MIN,
                 now: datetime | None = None,
-                late_discovery: bool = False) -> int | None:
+                late_discovery: bool = False,
+                is_baseline: bool = False) -> int | None:
     """Open a forward-test entry for a token's first mention.
 
     Returns the call_id, or None if a call already exists OR the mention
@@ -59,14 +60,14 @@ def create_call(conn, source_id: int, contract_address: str,
     cur = conn.execute(
         """INSERT INTO calls (source_id, contract_address, ts_utc, mcap_at_call,
                               price_at_call, liquidity_at_call, baseline_ts,
-                              status, late_discovery)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)""",
+                              status, late_discovery, is_baseline)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)""",
         (source_id, contract_address, _iso(mention_dt),
          market.mcap if has_baseline else None,
          market.price_usd if has_baseline else None,
          market.liquidity_usd if has_baseline else None,
          _iso(now_dt) if has_baseline else None,
-         int(late_discovery)),
+         int(late_discovery), int(is_baseline)),
     )
     call_id = cur.lastrowid
     for minutes in checkpoints_min:
@@ -200,7 +201,8 @@ def channel_stats(conn) -> list[dict]:
                   EXISTS(SELECT 1 FROM call_checkpoints k
                          WHERE k.call_id = c.call_id AND k.liq_gone = 1),
                   c.late_discovery
-           FROM calls c JOIN sources s ON s.source_id = c.source_id""").fetchall()
+           FROM calls c JOIN sources s ON s.source_id = c.source_id
+           WHERE c.is_baseline = 0""").fetchall()
 
     def aggregate(name: str, subset: list) -> dict:
         regular = [r for r in subset if not r[5]]

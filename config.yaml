@@ -42,6 +42,18 @@ enrichment:
   # first mention (pre-pool calls get a pool minutes later); then final
   no_pairs_retry_window_h: 24
 
+# Launch baseline: independent sample of new tokens from DexScreener's
+# token-profiles feed, for comparison against called tokens (§10).
+# Budget math: max_new_per_cycle=10 per 300s poll => <=120 tokens/day;
+# each costs 1 resolution request + 4 checkpoint measurements over 24h
+# ~= 600 requests/day ~= 0.4 req/min of the shared 300/min budget.
+baseline:
+  enabled: true
+  poll_interval_s: 300
+  max_new_per_cycle: 10
+  # only pools younger than this count as "new launch"
+  max_pool_age_min: 60
+
 forward_testing:
   enabled: true
   # measurement points in minutes after the first mention

@@ -23,6 +23,7 @@ from tracker.models import EnrichedToken
 log = logging.getLogger(__name__)
 
 TOKENS_PATH = "/latest/dex/tokens/"
+PROFILES_PATH = "/token-profiles/latest/v1"
 
 # The tokens endpoint caps the response at ~30 pairs TOTAL, regardless of
 # how many addresses were queried. An address missing from a capped
@@ -202,6 +203,30 @@ class DexScreenerClient:
         log.warning("dexscreener still 429 after %d retries, giving up this cycle",
                     self._max_retries)
         return None
+
+    def fetch_token_profiles(self) -> list[dict] | None:
+        """Latest token profiles on the target chain (the launch-baseline
+        feed). Returns [{'address': ..., 'links_json': ...}, ...] or None on
+        a failed request. NOTE: this feed contains tokens whose deployers
+        set up a profile — a biased sample, not the universe of new pools."""
+        data = self._get(f"{self._base}{PROFILES_PATH}")
+        if data is None:
+            return None
+        if not isinstance(data, list):
+            log.error("token-profiles schema changed? got %s", type(data).__name__)
+            return None
+        out = []
+        for item in data:
+            if not (isinstance(item, dict)
+                    and isinstance(item.get("tokenAddress"), str)
+                    and item.get("chainId") == self._chain_id):
+                continue
+            links = item.get("links")
+            out.append({
+                "address": item["tokenAddress"],
+                "links_json": json.dumps(links) if isinstance(links, list) else None,
+            })
+        return out
 
     def fetch_tokens(self, addresses: list[str]) -> dict[str, EnrichedToken | None]:
         """Fetch market data for up to N addresses, chunked by 30.

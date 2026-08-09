@@ -96,6 +96,24 @@ CREATE TABLE IF NOT EXISTS calls (
     outcome_mae       REAL
 );
 
+CREATE TABLE IF NOT EXISTS baseline_tokens (
+    contract_address  TEXT PRIMARY KEY,
+    chain             TEXT NOT NULL,
+    ticker            TEXT,
+    name              TEXT,
+    discovered_ts     TEXT NOT NULL,
+    first_seen_price  REAL,
+    first_seen_mcap   REAL,
+    socials_json      TEXT,
+    launch_ts         TEXT,
+    dex_id            TEXT,
+    pair_address      TEXT,
+    pool_created_at   TEXT,
+    enriched_at       TEXT,
+    enrich_status     TEXT,
+    mentioned_ts      TEXT
+);
+
 CREATE TABLE IF NOT EXISTS call_checkpoints (
     call_id           INTEGER NOT NULL REFERENCES calls(call_id),
     checkpoint_min    INTEGER NOT NULL,
@@ -147,6 +165,9 @@ _CALLS_M6_COLUMNS = {
     "late_discovery": "INTEGER NOT NULL DEFAULT 0",
     # 1 = the +24h outcome reply was posted (or nothing to post)
     "outcome_posted": "INTEGER NOT NULL DEFAULT 0",
+    # 1 = launch-baseline entry (synthetic source, anchored at discovery
+    # time) — excluded from per-channel statistics
+    "is_baseline": "INTEGER NOT NULL DEFAULT 0",
 }
 
 _MENTIONS_ALERT_COLUMNS = {

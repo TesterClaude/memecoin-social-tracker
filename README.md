@@ -80,6 +80,20 @@ in every statistic (no survivorship bias). Report per channel:
 python report_forward.py
 ```
 
+## Launch baseline
+
+An independent collector samples new Solana tokens from DexScreener's
+token-profiles feed (`baseline` in config.yaml), regardless of channel
+mentions, into `baseline_tokens` — each with forward-log checkpoints via
+the shared calls machinery (`calls.is_baseline=1`, synthetic source,
+excluded from channel stats). Admission is capped (`max_new_per_cycle`,
+`max_pool_age_min`) so the baseline cannot eat the shared 300 req/min
+budget (~0.4 req/min at defaults). `report_forward.py` compares called
+vs. baseline outcomes, shows the coverage of the baseline by tracked
+channels, and lists serial deployers (same X handle on >= 2 tokens).
+Honesty: the profiles feed is a biased sample (marketed tokens), not the
+universe of all new pools — a true firehose needs an on-chain indexer.
+
 ## Notes
 
 - `t.me/s/` serves only the ~20 most recent messages per fetch; at a 45 s

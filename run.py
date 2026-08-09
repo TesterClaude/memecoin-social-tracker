@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from tracker import alert as alert_fmt
-from tracker import classify, db, extract, forward
+from tracker import baseline, classify, db, extract, forward
 from tracker.alert import AlertBot
 from tracker.collector.telegram_preview import TelegramPreviewCollector
 from tracker.config import load_config
@@ -194,6 +194,10 @@ def main() -> None:
     if cfg.forward_enabled and enricher is None:
         log.warning("forward_testing.enabled without enrichment: entries are "
                     "created but checkpoints cannot be measured")
+    if cfg.baseline_enabled and enricher is None:
+        log.warning("baseline.enabled without enrichment: baseline collector "
+                    "is disabled (needs the DexScreener client)")
+    last_baseline_poll = float("-inf")
 
     while True:
         cycle_start = time.monotonic()
@@ -236,6 +240,14 @@ def main() -> None:
                 measured = forward.record_measurements(
                     conn, enricher.fetch_tokens(due), cfg.rug_liquidity_floor_usd)
 
+        # phase 4a: launch-baseline discovery — lowest priority on the
+        # shared rate limit, runs on its own (longer) interval
+        baseline_admitted = 0
+        if cfg.baseline_enabled and enricher is not None \
+                and time.monotonic() - last_baseline_poll >= cfg.baseline_poll_interval_s:
+            baseline_admitted = baseline.run_discovery(conn, cfg, enricher, ignore)
+            last_baseline_poll = time.monotonic()
+
         # phase 4b: post finalised +24h outcomes as replies under the
         # origin call (config-switchable, restart-safe via outcome_posted)
         if bot is not None and cfg.post_24h_outcome_reply:
@@ -262,9 +274,10 @@ def main() -> None:
 
         elapsed = time.monotonic() - cycle_start
         log.info("cycle done in %.1fs: %d new messages, %d enriched, "
-                 "%d calls opened, %d checkpoints measured, %d alerts%s",
+                 "%d calls opened, %d checkpoints measured, %d alerts%s%s",
                  elapsed, len(new_items), len(market), calls_opened, measured,
                  alerts_sent,
+                 f", {baseline_admitted} baseline admitted" if baseline_admitted else "",
                  f", {suppressed} suppressed by cap" if suppressed else "")
         time.sleep(max(0.0, cfg.poll_interval_s - elapsed))
 
